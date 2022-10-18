@@ -17,6 +17,7 @@ FetchContent_MakeAvailable(NewEngine)
 add_executable (3DRendering "3DRendering.cpp")
 
 target_link_libraries(3DRendering NewEngine-Runtime)
+target_link_libraries(3DRendering assimp)
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET 3DRendering PROPERTY CXX_STANDARD 20)

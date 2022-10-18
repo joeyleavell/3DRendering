@@ -6,6 +6,9 @@
 #include "glm/glm.hpp"
 #include "spdlog/sinks/basic_file_sink.h"
 #include "spdlog/sinks/stdout_color_sinks.h"
+#include "assimp/Importer.hpp"
+#include "ImGuiInterface.h"
+#include "imgui_internal.h"
 
 using namespace std;
 
@@ -98,6 +101,16 @@ Mesh CreateScreenSpaceMesh(VertexType DefaultVal)
     return NewMesh;
 }
 
+void DrawImGui()
+{
+    static bool WindowOpen = true;
+    if(ImGui::Begin("Test Window", &WindowOpen))
+    {
+	    
+    }
+    ImGui::End();
+}
+
 int main()
 {
     std::string ExePath;
@@ -147,6 +160,9 @@ int main()
     GRenderAPI->InitializeForSurface(Globals.mSurface); // Finish render API initialization
     Globals.mSwap = CreateSwap(Globals.mWindow, Globals.mSurface); // Create Vulkan swap chain for window
 
+    ImGuiContext* Context = InitImGui(Globals.mWindow, Globals.mSwap, { true, true, true });
+    ImGui::SetCurrentContext(Context);
+
     CommandBuffer FinalPass = GRenderAPI->CreateSwapChainCommandBuffer(Globals.mSwap, true);
     Pipeline FinalPassPipeline = CreateFinalPassPipeline();
 
@@ -156,7 +172,11 @@ int main()
     {
         PollWindowEvents();
 
-        // TODO: do stuff
+        BeginImGuiFrame();
+        {
+            DrawImGui();
+        }
+        EndImGuiFrame();
 
         GRenderAPI->BeginFrame(Globals.mSwap, Globals.mSurface, FrameWidth, FrameHeight);
         {
@@ -177,12 +197,18 @@ int main()
                     GRenderAPI->DrawVertexBufferIndexed(FinalPass, ScreenSpaceMesh.mBuffer, ScreenSpaceMesh.mIndexCount);
                 }
                 GRenderAPI->EndRenderGraph(FinalPass);
+
+                // ImGui
+
+                RecordImGuiDrawCmds(FinalPass);
             }
             GRenderAPI->End(FinalPass);
 
             GRenderAPI->SubmitSwapCommandBuffer(Globals.mSwap, FinalPass);
         }
         GRenderAPI->EndFrame(Globals.mSwap, Globals.mSurface, FrameWidth, FrameHeight);
+
+        UpdateImGuiViewports();
     }
 
     GRenderAPI->DestroySwapChain(Globals.mSwap);
