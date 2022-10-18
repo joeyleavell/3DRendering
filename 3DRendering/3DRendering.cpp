@@ -7,6 +7,9 @@
 #include "spdlog/sinks/basic_file_sink.h"
 #include "spdlog/sinks/stdout_color_sinks.h"
 #include "assimp/Importer.hpp"
+#include "assimp/postprocess.h"
+#include "assimp/scene.h"
+#include "assimp/mesh.h"
 #include "ImGuiInterface.h"
 #include "imgui_internal.h"
 
@@ -32,11 +35,22 @@ struct FinalPassVertex
     glm::vec3 mPosition;
 };
 
+struct MeshVertex
+{
+    glm::vec3 Position;
+};
+
 struct Mesh
 {
     VertexBuffer mBuffer;
     uint32_t mVertexCount;
     uint32_t mIndexCount;
+};
+
+struct Scene
+{
+    std::vector<Mesh> mMeshes;
+
 };
 
 Pipeline CreateFinalPassPipeline()
@@ -101,6 +115,76 @@ Mesh CreateScreenSpaceMesh(VertexType DefaultVal)
     return NewMesh;
 }
 
+void ProcessNode(const aiScene* Scene, aiNode* Node)
+{
+
+}
+
+Mesh BuildMesh(const aiMesh* AIMesh)
+{
+    Mesh NewMesh;
+
+    std::vector<MeshVertex> Verts;
+    for(uint32_t VertIndex = 0; VertIndex < AIMesh->mNumVertices; VertIndex++)
+    {
+        aiVector3D Pos = AIMesh->mVertices[VertIndex];
+
+        MeshVertex Vert;
+        Vert.Position = {Pos.x, Pos.y, Pos.z};
+        Verts.push_back(Vert);
+    }
+
+    std::vector<uint32_t> Indicies;
+    for(uint32_t VertIndex = 0; VertIndex < AIMesh->mNumFaces; VertIndex++)
+    {
+        if(AIMesh->mFaces[VertIndex].mNumIndices == 3)
+        {
+            Indicies.push_back(AIMesh->mFaces[VertIndex].mIndices[0]);
+            Indicies.push_back(AIMesh->mFaces[VertIndex].mIndices[1]);
+            Indicies.push_back(AIMesh->mFaces[VertIndex].mIndices[2]);
+        }
+    }
+
+    VertexBufferCreateInfo CreateInfo{};
+    CreateInfo.bCreateIndexBuffer = true;
+    CreateInfo.VertexBufferSize = Verts.size() * sizeof(MeshVertex);
+    CreateInfo.IndexBufferSize = Indicies.size() * sizeof(uint32_t);
+    NewMesh.mBuffer = GRenderAPI->CreateVertexBuffer(&CreateInfo);
+
+    GRenderAPI->UploadVertexBufferData(NewMesh.mBuffer, Verts.data(), CreateInfo.VertexBufferSize);
+    GRenderAPI->UploadIndexBufferData(NewMesh.mBuffer, Indicies.data(), CreateInfo.IndexBufferSize);
+
+    NewMesh.mVertexCount = Verts.size();
+    NewMesh.mIndexCount = Indicies.size();
+
+    return NewMesh;
+}
+
+Scene ImportScene(std::string File)
+{
+    Assimp::Importer Importer;
+    const aiScene* AIScene = Importer.ReadFile(File,
+        aiProcess_CalcTangentSpace       |
+        aiProcess_Triangulate            |
+        aiProcess_JoinIdenticalVertices  |
+        aiProcess_SortByPType
+    );
+
+    Scene NewScene;
+
+    // Build meshes
+    for(uint32_t MeshIndex = 0; MeshIndex < AIScene->mNumMeshes; MeshIndex++)
+    {
+        aiMesh* Mesh = AIScene->mMeshes[MeshIndex];
+        NewScene.mMeshes.push_back(BuildMesh(Mesh));
+    }
+
+    if(AIScene->mRootNode)
+        ProcessNode(AIScene, AIScene->mRootNode);
+
+    return NewScene;
+}
+
 void DrawImGui()
 {
     static bool WindowOpen = true;
@@ -132,6 +216,7 @@ int main()
     // Mount shaders
     auto RootInstall = std::filesystem::path(ExePath).parent_path();
     auto ShadersRoot = RootInstall / "Shaders";
+    auto ContentRoot = RootInstall / "Content";
     MountDirectory(ShadersRoot.string().c_str(), "Shaders");
 
     uint32_t FrameWidth = 16 * 50, FrameHeight = 9 * 50;
@@ -168,6 +253,10 @@ int main()
 
     Mesh ScreenSpaceMesh = CreateScreenSpaceMesh(FinalPassVertex{});
 
+    // Load the scene
+    auto SceneFile = ContentRoot / "Sponza-master" / "sponza.obj";
+    Scene NewScene = ImportScene(SceneFile.string());
+
     while (!ShouldWindowClose(Globals.mWindow))
     {
         PollWindowEvents();
@@ -178,22 +267,25 @@ int main()
         }
         EndImGuiFrame();
 
+        uint32_t SwapWidth, SwapHeight;
+        GRenderAPI->GetSwapChainSize(Globals.mSwap, SwapWidth, SwapHeight);
+
         GRenderAPI->BeginFrame(Globals.mSwap, Globals.mSurface, FrameWidth, FrameHeight);
         {
             GRenderAPI->Reset(FinalPass);
             GRenderAPI->Begin(FinalPass);
             {
                 RenderGraphInfo CompositeInfo = {
-    1,
-    ClearValue{ClearType::Float, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)}
+                    1,
+                    ClearValue{ClearType::Float, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)}
                 };
 
                 GRenderAPI->BeginRenderGraph(FinalPass, Globals.mSwap, CompositeInfo);
                 {
 
                     GRenderAPI->BindPipeline(FinalPass, FinalPassPipeline);
-                    GRenderAPI->SetViewport(FinalPass, 0, 0, static_cast<uint32_t>(FrameWidth), static_cast<uint32_t>(FrameHeight));
-                    GRenderAPI->SetScissor(FinalPass, 0, 0, static_cast<uint32_t>(FrameWidth), static_cast<uint32_t>(FrameHeight));
+                    GRenderAPI->SetViewport(FinalPass, 0, 0, static_cast<uint32_t>(SwapWidth), static_cast<uint32_t>(SwapHeight));
+                    GRenderAPI->SetScissor(FinalPass, 0, 0, static_cast<uint32_t>(SwapWidth), static_cast<uint32_t>(SwapHeight));
                     GRenderAPI->DrawVertexBufferIndexed(FinalPass, ScreenSpaceMesh.mBuffer, ScreenSpaceMesh.mIndexCount);
                 }
                 GRenderAPI->EndRenderGraph(FinalPass);

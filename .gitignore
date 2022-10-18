@@ -1,8 +1,12 @@
+.DS_Store
+
 # Visual Studio
 /.vs
 
 # CMake
 /out
+/Install
+/Build
 
 # Prerequisites
 *.d
