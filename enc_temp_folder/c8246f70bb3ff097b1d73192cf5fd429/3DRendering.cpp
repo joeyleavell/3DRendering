@@ -720,6 +720,9 @@ void Tick(float Delta)
             Rotated = true;
         }
 
+        if (NewForward.z > 0.99)
+            NewForward = Forward;
+
         if(Rotated)
         {
             SceneRes.mSceneCamera.Rotation = glm::quatLookAt(glm::normalize(NewForward), glm::vec3(Up.x, Up.y, Up.z));

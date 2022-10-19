@@ -7,7 +7,7 @@ Set(FETCHCONTENT_QUIET FALSE)
 FetchContent_Declare(
 	NewEngine
 	GIT_REPOSITORY https://github.com/joeyleavell/NewEngine.git
-	GIT_TAG        33579e1c5b7132622a8978a59bf877243f4a3500
+	GIT_TAG        69f7f61f046d547dfb658301ee69960e70fc2669
 	GIT_PROGRESS TRUE
 )
 
