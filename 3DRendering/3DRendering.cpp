@@ -11,9 +11,17 @@
 #include "assimp/scene.h"
 #include "assimp/mesh.h"
 #include "ImGuiInterface.h"
+#include "glm/gtc/matrix_transform.hpp"
 #include "imgui_internal.h"
+#include <cmath>
 
 using namespace std;
+
+constexpr double PI = 3.14159265;
+constexpr float DegreesToRadians(float Deg)
+{
+    return Deg * (PI / 180);
+}
 
 struct AppGlobals
 {
@@ -35,9 +43,15 @@ struct FinalPassVertex
     glm::vec3 mPosition;
 };
 
+struct SceneVertexUniforms
+{
+    glm::mat4 ViewProjectionMatrix;
+};
+
 struct MeshVertex
 {
-    glm::vec3 Position;
+    glm::vec3 mPosition;
+    glm::vec3 mNormal;
 };
 
 struct Mesh
@@ -52,6 +66,219 @@ struct Scene
     std::vector<Mesh> mMeshes;
 
 };
+
+struct Camera
+{
+    glm::vec3 Position;
+    glm::vec3 Rotation;
+
+    float NearClip = 0.01f;
+    float FarClip = 5000.0f;
+    float Aspect = 0.0f;
+    float FieldOfView = 90.0f;
+};
+
+struct MetricCategory
+{
+    double LastTime = 0.0;
+    double MinTime = std::numeric_limits<double>::max();
+    double MaxTime = 0.0;
+    double AvgTime = 0.0;
+
+    // For tracking avg time
+    double SumTime = 0.0;
+    uint32_t NumPublishes = 0;
+};
+
+struct Metrics
+{
+    std::unordered_map<std::string, MetricCategory> mMetrics;
+
+    void PublishTime(std::string Category, double Time)
+    {
+        if (!mMetrics.contains(Category))
+            mMetrics.emplace(Category, MetricCategory{});
+
+        MetricCategory& Met = mMetrics[Category];
+
+        // Determine if outlier
+        //if (Met.AvgTime > 0.0001 && (Time / Met.AvgTime > 2.0 || Time / Met.AvgTime < 0.5))
+         //   return;
+
+        Met.LastTime = Time;
+    	Met.MinTime = std::min(Met.MinTime, Time);
+        Met.MaxTime = std::max(Met.MaxTime, Time);
+
+    	Met.SumTime += Time;
+        Met.NumPublishes++;
+        Met.AvgTime = Met.SumTime / Met.NumPublishes;
+    }
+
+    double GetLastTime(std::string Category)
+    {
+        return mMetrics[Category].LastTime * 1000.0;
+    }
+
+    double GetAvgTime(std::string Category)
+    {
+        return mMetrics[Category].AvgTime * 1000.0;
+    }
+
+    double GetMinTime(std::string Category)
+    {
+        return mMetrics[Category].MinTime * 1000.0;
+    }
+
+    double GetMaxTime(std::string Category)
+    {
+        return mMetrics[Category].MaxTime * 1000.0;
+    }
+
+} gMetrics;
+
+struct Profiler
+{
+    std::chrono::high_resolution_clock::time_point Start;
+	Profiler()
+	{
+        Start = std::chrono::high_resolution_clock::now();
+	}
+
+    double End()
+	{
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now() - Start).count() / (double) 1e9;
+	}
+};
+
+#define PROFILE_START(Category) Profiler Prof_##Category;
+#define PROFILE_END(Category) gMetrics.PublishTime(#Category, Prof_##Category.End());
+
+struct Stats
+{
+    float FrameTime;
+};
+
+struct SceneRenderResources
+{
+    SceneVertexUniforms mVertexUniforms;
+    ResourceSet mForwardResources;
+    ResourceLayout mForwardResourceLayout;
+    Pipeline mForwardPipe;
+
+    Camera mSceneCamera;
+
+    bool mInitialized = false;
+
+    void CreateForwardResources(SwapChain Swap)
+    {
+        ResourceSetCreateInfo CreateInfo{};
+        CreateInfo.TargetSwap = Swap;
+        CreateInfo.Layout = mForwardResourceLayout;
+        mForwardResources = GRenderAPI->CreateResourceSet(&CreateInfo);
+    }
+
+    void CreateForwardPipeline()
+    {
+        ConstantBufferDescription ConstBuffer[] = {
+            {0, 1, ShaderStage::Vertex, sizeof(SceneVertexUniforms)}
+        };
+        ResourceLayoutCreateInfo RlCreateInfo{};
+        RlCreateInfo.ConstantBufferCount = std::size(ConstBuffer);
+        RlCreateInfo.ConstantBuffers = ConstBuffer;
+        mForwardResourceLayout = GRenderAPI->CreateResourceLayout(&RlCreateInfo);
+
+        ShaderCreateInfo ShaderCreateInfo{};
+        ShaderCreateInfo.VertexShaderVirtual = "/Shaders/Forward.vert";
+        ShaderCreateInfo.FragmentShaderVirtual = "/Shaders/Forward.frag";
+
+        VertexAttribute Attribs[] = {
+            {VertexAttributeFormat::Float3, offsetof(MeshVertex, mPosition)},
+            {VertexAttributeFormat::Float3, offsetof(MeshVertex, mNormal)}
+        };
+        PipelineCreateInfo CreateInfo{};
+        CreateInfo.VertexAttributeCount = std::size(Attribs);
+        CreateInfo.VertexAttributes = Attribs;
+        CreateInfo.VertexBufferStride = sizeof(MeshVertex);
+        CreateInfo.Shader = GRenderAPI->CreateShader(&ShaderCreateInfo);
+        CreateInfo.CompatibleSwapChain = Globals.mSwap;
+        CreateInfo.Layout = mForwardResourceLayout;
+
+        PipelineBlendSettings BlendSettings;
+        BlendSettings.bBlendingEnabled = false;
+        CreateInfo.BlendSettingCount = 1;
+        CreateInfo.BlendSettings = &BlendSettings;
+
+        mForwardPipe = GRenderAPI->CreatePipeline(&CreateInfo);
+    }
+
+    void UpdateCamera()
+    {
+        uint32_t SwapWidth, SwapHeight;
+        GRenderAPI->GetSwapChainSize(Globals.mSwap, SwapWidth, SwapHeight);
+
+    	// Swap resolution
+        mSceneCamera.Aspect = (float)SwapWidth / SwapHeight;
+        mSceneCamera.FieldOfView = DegreesToRadians(75.0f);
+        mSceneCamera.NearClip = 0.1f;
+        mSceneCamera.FarClip = 5000.0f;
+    }
+
+    void Init(SwapChain Swap)
+    {
+        UpdateCamera();
+
+        CreateForwardPipeline();
+        CreateForwardResources(Swap);
+    }
+
+
+} SceneRes;
+
+glm::mat4 CreateCameraProjection(Camera& Cam)
+{
+    return glm::perspective(Cam.FieldOfView, Cam.Aspect, Cam.NearClip, Cam.FarClip);
+}
+
+glm::mat4 CreateViewMatrix(Camera& Cam)
+{
+    glm::mat4 Translation = glm::translate(glm::mat4(1.0f), Cam.Position);
+    glm::mat4 RotX = glm::rotate(glm::mat4(1.0f), Cam.Rotation.x, glm::vec3(1.0f, 0.0f, 0.0f));
+    glm::mat4 RotY = glm::rotate(glm::mat4(1.0f), Cam.Rotation.y, glm::vec3(0.0f, 1.0f, 0.0f));
+    glm::mat4 RotZ = glm::rotate(glm::mat4(1.0f), Cam.Rotation.z, glm::vec3(0.0f, 0.0f, 1.0f));
+
+    glm::mat4 Transform = Translation * RotX * RotY * RotZ;
+
+    return glm::inverse(Transform);
+}
+
+Pipeline CreateForwardPipeline()
+{
+    ResourceLayoutCreateInfo RlCreateInfo{};
+    ResourceLayout Layout = GRenderAPI->CreateResourceLayout(&RlCreateInfo);
+
+    ShaderCreateInfo ShaderCreateInfo{};
+    ShaderCreateInfo.VertexShaderVirtual = "/Shaders/Foward.vert";
+    ShaderCreateInfo.FragmentShaderVirtual = "/Shaders/Forward.frag";
+
+    VertexAttribute Attribs[] = {
+        {VertexAttributeFormat::Float3, offsetof(MeshVertex, mPosition)},
+        {VertexAttributeFormat::Float3, offsetof(MeshVertex, mNormal)}
+    };
+    PipelineCreateInfo CreateInfo{};
+    CreateInfo.VertexAttributeCount = std::size(Attribs);
+    CreateInfo.VertexAttributes = Attribs;
+    CreateInfo.VertexBufferStride = sizeof(MeshVertex);
+    CreateInfo.Shader = GRenderAPI->CreateShader(&ShaderCreateInfo);
+    CreateInfo.CompatibleSwapChain = Globals.mSwap;
+    CreateInfo.Layout = Layout;
+
+    PipelineBlendSettings BlendSettings;
+    BlendSettings.bBlendingEnabled = false;
+    CreateInfo.BlendSettingCount = 1;
+    CreateInfo.BlendSettings = &BlendSettings;
+
+    return GRenderAPI->CreatePipeline(&CreateInfo);
+}
 
 Pipeline CreateFinalPassPipeline()
 {
@@ -81,6 +308,47 @@ Pipeline CreateFinalPassPipeline()
     return GRenderAPI->CreatePipeline(&CreateInfo);
 }
 
+struct SceneResourceInit
+{
+    SceneResourceInit()
+    {
+	    
+    }
+};
+
+void RenderScene(CommandBuffer Dst, Scene Render, uint32_t SwapWidth, uint32_t SwapHeight)
+{
+    if(!SceneRes.mInitialized)
+    {
+        SceneRes.Init(Globals.mSwap);
+    	SceneRes.mInitialized = true;
+    }
+
+    RenderGraphInfo CompositeInfo = {
+    1,
+    ClearValue{ClearType::Float, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)}
+    };
+
+    GRenderAPI->BeginRenderGraph(Dst, Globals.mSwap, CompositeInfo);
+    {
+        GRenderAPI->UpdateUniformBuffer(SceneRes.mForwardResources, Globals.mSwap, 0, &SceneRes.mVertexUniforms, sizeof(SceneRes.mVertexUniforms));
+
+    	GRenderAPI->BindPipeline(Dst, SceneRes.mForwardPipe);
+        GRenderAPI->BindResources(Dst, SceneRes.mForwardResources);
+    	GRenderAPI->SetViewport(Dst, 0, 0, static_cast<uint32_t>(SwapWidth), static_cast<uint32_t>(SwapHeight));
+        GRenderAPI->SetScissor(Dst, 0, 0, static_cast<uint32_t>(SwapWidth), static_cast<uint32_t>(SwapHeight));
+
+       // GRenderAPI->DrawVertexBufferIndexed(Dst, Render.mMeshes[0].mBuffer, Render.mMeshes[0].mIndexCount);
+
+        for (auto Mesh : Render.mMeshes)
+        {
+            GRenderAPI->DrawVertexBufferIndexed(Dst, Mesh.mBuffer, Mesh.mIndexCount);
+        }
+    }
+    GRenderAPI->EndRenderGraph(Dst);
+
+}
+
 template<typename VertexType>
 Mesh CreateScreenSpaceMesh(VertexType DefaultVal)
 {
@@ -100,10 +368,10 @@ Mesh CreateScreenSpaceMesh(VertexType DefaultVal)
     };
     if (std::is_same_v<decltype(DefaultVal.mPosition), glm::vec3>)
     {
-        ScreenSpace[0].mPosition = { -1.0f, -1.0f, 0.0f };
-        ScreenSpace[1].mPosition = { -1.0f, 1.0f, 0.0f };
-        ScreenSpace[2].mPosition = { 1.0f, 1.0f, 0.0f };
-        ScreenSpace[3].mPosition = { 1.0f, -1.0f, 0.0f };
+        ScreenSpace[0].mPosition = { -1.0f, -1.0f, -5.0f };
+        ScreenSpace[1].mPosition = { -1.0f, 1.0f, -5.0f };
+        ScreenSpace[2].mPosition = { 1.0f, 1.0f, -5.0f };
+        ScreenSpace[3].mPosition = { 1.0f, -1.0f, -5.0f };
     }
 
     GRenderAPI->UploadVertexBufferData(NewMesh.mBuffer, ScreenSpace, sizeof(ScreenSpace));
@@ -120,6 +388,8 @@ void ProcessNode(const aiScene* Scene, aiNode* Node)
 
 }
 
+static glm::vec3 Bl, Tr;
+
 Mesh BuildMesh(const aiMesh* AIMesh)
 {
     Mesh NewMesh;
@@ -128,10 +398,19 @@ Mesh BuildMesh(const aiMesh* AIMesh)
     for(uint32_t VertIndex = 0; VertIndex < AIMesh->mNumVertices; VertIndex++)
     {
         aiVector3D Pos = AIMesh->mVertices[VertIndex];
+        aiVector3D Norm = AIMesh->mNormals[VertIndex];
 
         MeshVertex Vert;
-        Vert.Position = {Pos.x, Pos.y, Pos.z};
+        Vert.mPosition = {Pos.x, Pos.y, Pos.z};
+        Vert.mNormal = {Norm.x, Norm.y, Norm.z};
         Verts.push_back(Vert);
+
+        Bl.x = std::min(Bl.x, Vert.mPosition.x);
+        Bl.y = std::min(Bl.y, Vert.mPosition.y);
+        Bl.z = std::min(Bl.z, Vert.mPosition.z);
+        Tr.x = std::max(Tr.x, Vert.mPosition.x);
+        Tr.y = std::max(Tr.y, Vert.mPosition.y);
+        Tr.z = std::max(Tr.z, Vert.mPosition.z);
     }
 
     std::vector<uint32_t> Indicies;
@@ -188,11 +467,37 @@ Scene ImportScene(std::string File)
 void DrawImGui()
 {
     static bool WindowOpen = true;
-    if(ImGui::Begin("Test Window", &WindowOpen))
+    if(ImGui::Begin("Profiling", &WindowOpen))
     {
-	    
+        if (ImGui::CollapsingHeader("Bounds"))
+        {
+            ImGui::Text("Bottom Left: %.2f %.2f %.2f", Bl.x, Bl.y, Bl.z);
+            ImGui::Text("Top Right: %.2f %.2f %.2f", Tr.x, Tr.y, Tr.z);
+        }
+
+        if(ImGui::CollapsingHeader("Frame"))
+        {
+            ImGui::Text("Last: %.2f ms", gMetrics.GetLastTime("Frame"));
+            ImGui::Text("Avg: %.2f ms", gMetrics.GetAvgTime("Frame"));
+        	ImGui::Text("Min: %.2f ms", gMetrics.GetMinTime("Frame"));
+            ImGui::Text("Max: %.2f ms", gMetrics.GetMaxTime("Frame"));
+        }
     }
     ImGui::End();
+}
+float z = 0.f;
+
+void Tick(float Delta)
+{
+    z += Delta * 10.0f;
+    SceneRes.mSceneCamera.Position = glm::vec3(0.0f, 0.0f, z);
+    glm::mat4 Proj = CreateCameraProjection(SceneRes.mSceneCamera);
+    glm::mat4 View = CreateViewMatrix(SceneRes.mSceneCamera);
+    
+	SceneRes.mVertexUniforms.ViewProjectionMatrix = glm::transpose(Proj * View);
+
+    glm::vec4 Forward = glm::vec4(0.0f, 0.0f, -1.0f, 0.0f);
+    glm::vec4 Right = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f);
 }
 
 int main()
@@ -233,6 +538,8 @@ int main()
         FrameWidth = NewWidth;
         FrameHeight = NewHeight;
         GRenderAPI->RecreateSwapChain(Globals.mSwap, Globals.mSurface, NewWidth, NewHeight);
+
+        SceneRes.UpdateCamera();
     };
 
     if (!InitializeRenderAPI(DynamicRenderAPI::Vulkan))
@@ -257,9 +564,18 @@ int main()
     auto SceneFile = ContentRoot / "Sponza-master" / "sponza.obj";
     Scene NewScene = ImportScene(SceneFile.string());
 
+    auto ThisTime = std::chrono::high_resolution_clock::now();
+    auto LastTime = ThisTime;
+
     while (!ShouldWindowClose(Globals.mWindow))
     {
         PollWindowEvents();
+
+        // Update
+        ThisTime = std::chrono::high_resolution_clock::now();
+        float Delta = static_cast<float>(std::chrono::duration_cast<std::chrono::nanoseconds>(ThisTime - LastTime).count() / (double)1e9);
+        LastTime = ThisTime;
+        Tick(Delta);
 
         BeginImGuiFrame();
         {
@@ -270,28 +586,13 @@ int main()
         uint32_t SwapWidth, SwapHeight;
         GRenderAPI->GetSwapChainSize(Globals.mSwap, SwapWidth, SwapHeight);
 
+        PROFILE_START(Frame)
         GRenderAPI->BeginFrame(Globals.mSwap, Globals.mSurface, FrameWidth, FrameHeight);
         {
             GRenderAPI->Reset(FinalPass);
             GRenderAPI->Begin(FinalPass);
             {
-                RenderGraphInfo CompositeInfo = {
-                    1,
-                    ClearValue{ClearType::Float, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)}
-                };
-
-                GRenderAPI->BeginRenderGraph(FinalPass, Globals.mSwap, CompositeInfo);
-                {
-
-                    GRenderAPI->BindPipeline(FinalPass, FinalPassPipeline);
-                    GRenderAPI->SetViewport(FinalPass, 0, 0, static_cast<uint32_t>(SwapWidth), static_cast<uint32_t>(SwapHeight));
-                    GRenderAPI->SetScissor(FinalPass, 0, 0, static_cast<uint32_t>(SwapWidth), static_cast<uint32_t>(SwapHeight));
-                    GRenderAPI->DrawVertexBufferIndexed(FinalPass, ScreenSpaceMesh.mBuffer, ScreenSpaceMesh.mIndexCount);
-                }
-                GRenderAPI->EndRenderGraph(FinalPass);
-
-                // ImGui
-
+                RenderScene(FinalPass, NewScene, SwapWidth, SwapHeight);
                 RecordImGuiDrawCmds(FinalPass);
             }
             GRenderAPI->End(FinalPass);
@@ -299,6 +600,8 @@ int main()
             GRenderAPI->SubmitSwapCommandBuffer(Globals.mSwap, FinalPass);
         }
         GRenderAPI->EndFrame(Globals.mSwap, Globals.mSurface, FrameWidth, FrameHeight);
+        PROFILE_END(Frame)
+
 
         UpdateImGuiViewports();
     }
