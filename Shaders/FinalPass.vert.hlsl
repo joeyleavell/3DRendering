@@ -1,23 +1,21 @@
-/*cbuffer VertexData : register(b0, space0)
-{
-    float4x4 ViewProjection;
-}*/
-
 struct VSIn
 {
-    float3 Position : SV_Position;
+    float2 Position : SV_Position;
+    float2 UV : TEXCOORD0;
 };
 
 struct VSOut
 {
     float4 Position : SV_Position;
+    float2 UV : TEXCOORD0;
 };
 
 VSOut main(VSIn Input)
 {
     VSOut Output;
 
-    Output.Position = float4(Input.Position, 1.0);
+    Output.Position = float4(Input.Position, 0.0, 1.0);
+    Output.UV = Input.UV;
 
     return Output;
 }

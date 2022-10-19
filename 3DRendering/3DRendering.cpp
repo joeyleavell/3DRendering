@@ -40,7 +40,8 @@ SwapChain CreateSwap(Window* Wnd, Surface Surf)
 
 struct FinalPassVertex
 {
-    glm::vec3 mPosition;
+    glm::vec2 mPosition;
+    glm::vec2 mUV;
 };
 
 struct SceneVertexUniforms
@@ -88,6 +89,7 @@ struct MetricCategory
     // For tracking avg time
     double SumTime = 0.0;
     uint32_t NumPublishes = 0;
+    uint32_t NumIgnores = 0;
 };
 
 struct Metrics
@@ -100,6 +102,13 @@ struct Metrics
             mMetrics.emplace(Category, MetricCategory{});
 
         MetricCategory& Met = mMetrics[Category];
+
+        // Ignore first few publishes, usually they are slow
+        if(Met.NumIgnores < 10)
+        {
+            Met.NumIgnores++;
+            return;
+        }
 
         // Determine if outlier
         //if (Met.AvgTime > 0.0001 && (Time / Met.AvgTime > 2.0 || Time / Met.AvgTime < 0.5))
@@ -158,16 +167,113 @@ struct Stats
     float FrameTime;
 };
 
+struct PostProcessResources
+{
+
+};
+
+template<typename VertexType, bool UVs>
+Mesh CreateScreenSpaceMesh(VertexType DefaultVal)
+{
+    Mesh NewMesh{};
+
+    VertexBufferCreateInfo VBOCreate{};
+    VBOCreate.bCreateIndexBuffer = true;
+    VBOCreate.Usage = BufferUsage::Static;
+    VBOCreate.VertexBufferSize = sizeof(VertexType) * 4;
+    VBOCreate.IndexBufferSize = sizeof(uint32_t) * 6;
+    NewMesh.mBuffer = GRenderAPI->CreateVertexBuffer(&VBOCreate);
+
+    VertexType ScreenSpace[4] = { DefaultVal, DefaultVal, DefaultVal, DefaultVal };
+    uint32_t IndexBuffer[] = {
+        0, 2, 1,
+        0, 3, 2
+    };
+    if constexpr (std::is_same_v<decltype(DefaultVal.mPosition), glm::vec3>)
+    {
+        ScreenSpace[0].mPosition = { -1.0f, -1.0f, 0.0f };
+        ScreenSpace[1].mPosition = { -1.0f, 1.0f, 0.0f };
+        ScreenSpace[2].mPosition = { 1.0f, 1.0f, 0.0f };
+        ScreenSpace[3].mPosition = { 1.0f, -1.0f, 0.0f };
+    }
+    else if constexpr (std::is_same_v<decltype(DefaultVal.mPosition), glm::vec2>)
+    {
+        ScreenSpace[0].mPosition = { -1.0f, -1.0f};
+        ScreenSpace[1].mPosition = { -1.0f, 1.0f};
+        ScreenSpace[2].mPosition = { 1.0f, 1.0f};
+        ScreenSpace[3].mPosition = { 1.0f, -1.0f};
+    }
+
+    if constexpr (UVs)
+    {
+        ScreenSpace[0].mUV = { 0.0f, 1.0f};
+        ScreenSpace[1].mUV = { 0.0f, 0.0f};
+        ScreenSpace[2].mUV = { 1.0f, 0.0f};
+        ScreenSpace[3].mUV = { 1.0f, 1.0f};
+    }
+
+    GRenderAPI->UploadVertexBufferData(NewMesh.mBuffer, ScreenSpace, sizeof(ScreenSpace));
+    GRenderAPI->UploadIndexBufferData(NewMesh.mBuffer, IndexBuffer, sizeof(IndexBuffer));
+
+    NewMesh.mVertexCount = 4;
+    NewMesh.mIndexCount = 6;
+
+    return NewMesh;
+}
+
 struct SceneRenderResources
 {
     SceneVertexUniforms mVertexUniforms;
     ResourceSet mForwardResources;
     ResourceLayout mForwardResourceLayout;
     Pipeline mForwardPipe;
+    FrameBuffer mForwardFramebuffer;
+    RenderGraph mForwardRenderGraph;
 
     Camera mSceneCamera;
 
-    bool mInitialized = false;
+    void CreateForwardRenderGraph(SwapChain Swap)
+    {
+        RenderGraphAttachmentDescription ColorDesc[] = {
+            {AttachmentUsage::ColorAttachment, AttachmentUsage::ShaderRead, AttachmentFormat::B8G8R8A8_SRGB}
+        };
+
+        int32_t OutColor[] = {0};
+        RenderPassInfo Passes[] = {
+            {std::size(OutColor), OutColor, true}
+        };
+
+    	RenderGraphCreateInfo CreateInfo{};
+        CreateInfo.ColorAttachmentCount = std::size(ColorDesc);
+        CreateInfo.ColorAttachmentDescriptions = ColorDesc;
+        CreateInfo.bHasDepthStencilAttachment = true;
+    	CreateInfo.DepthStencilAttachmentDescription = { AttachmentUsage::DepthStencilAttachment, AttachmentUsage::DepthStencilAttachment, AttachmentFormat::DepthStencil };
+        CreateInfo.PassCount = 1;
+        CreateInfo.Passes = Passes;
+
+        mForwardRenderGraph = GRenderAPI->CreateRenderGraph(&CreateInfo);
+    }
+
+    void CreateForwardFramebuffer(SwapChain Swap)
+    {
+        uint32_t SwapWidth, SwapHeight;
+        GRenderAPI->GetSwapChainSize(Swap, SwapWidth, SwapHeight);
+
+        FramebufferAttachmentDescription ColorAttachments[] = {
+            {AttachmentUsage::ShaderRead, AttachmentFormat::B8G8R8A8_SRGB, FilterType::NEAREST}
+        };
+        FramebufferAttachmentDescription DepthStencil = { AttachmentUsage::DepthStencilAttachment, AttachmentFormat::DepthStencil, FilterType::NEAREST };
+        FrameBufferCreateInfo CreateInfo{};
+    	CreateInfo.ColorAttachmentCount = 1;
+        CreateInfo.ColorAttachmentDescriptions = ColorAttachments;
+        CreateInfo.bHasDepthStencilAttachment = true;
+        CreateInfo.DepthStencilDescription = DepthStencil;
+        CreateInfo.Width = SwapWidth;
+        CreateInfo.Height = SwapHeight;
+        CreateInfo.TargetGraph = mForwardRenderGraph;
+
+        mForwardFramebuffer = GRenderAPI->CreateFrameBuffer(&CreateInfo);
+    }
 
     void CreateForwardResources(SwapChain Swap)
     {
@@ -200,7 +306,7 @@ struct SceneRenderResources
         CreateInfo.VertexAttributes = Attribs;
         CreateInfo.VertexBufferStride = sizeof(MeshVertex);
         CreateInfo.Shader = GRenderAPI->CreateShader(&ShaderCreateInfo);
-        CreateInfo.CompatibleSwapChain = Globals.mSwap;
+        CreateInfo.CompatibleGraph = mForwardRenderGraph;
         CreateInfo.Layout = mForwardResourceLayout;
 
         PipelineBlendSettings BlendSettings;
@@ -223,11 +329,19 @@ struct SceneRenderResources
         mSceneCamera.FarClip = 5000.0f;
     }
 
+    void Resize(uint32_t NewWidth, uint32_t NewHeight)
+    {
+        GRenderAPI->ResizeFrameBuffer(mForwardFramebuffer, NewWidth, NewHeight);
+    }
+
     void Init(SwapChain Swap)
     {
         UpdateCamera();
 
-        CreateForwardPipeline();
+        CreateForwardRenderGraph(Swap);
+        CreateForwardFramebuffer(Swap);
+
+    	CreateForwardPipeline();
         CreateForwardResources(Swap);
     }
 
@@ -280,33 +394,96 @@ Pipeline CreateForwardPipeline()
     return GRenderAPI->CreatePipeline(&CreateInfo);
 }
 
-Pipeline CreateFinalPassPipeline()
+struct FinalPassResources
 {
-    ResourceLayoutCreateInfo RlCreateInfo{};
-    ResourceLayout Layout = GRenderAPI->CreateResourceLayout(&RlCreateInfo);
+    Pipeline mFinalPassPipeline;
+    ResourceLayout mFinalPassResourceLayout;
+    ResourceSet mFinalPassResourceSet;
+    Mesh mScreenSpaceMesh;
 
-    ShaderCreateInfo ShaderCreateInfo{};
-    ShaderCreateInfo.VertexShaderVirtual = "/Shaders/FinalPass.vert";
-    ShaderCreateInfo.FragmentShaderVirtual = "/Shaders/FinalPass.frag";
+    void CreateFinalPassResourceLayout()
+    {
+        TextureDescription Tex[] = {
+            {0, ShaderStage::Fragment, 1}
+        };
+        ResourceLayoutCreateInfo RlCreateInfo{};
+        RlCreateInfo.TextureCount = std::size(Tex);
+        RlCreateInfo.Textures = Tex;
 
-    VertexAttribute Attribs[] = {
-        {VertexAttributeFormat::Float3, offsetof(FinalPassVertex, mPosition)}
-    };
-    PipelineCreateInfo CreateInfo{};
-    CreateInfo.VertexAttributeCount = std::size(Attribs);
-    CreateInfo.VertexAttributes = Attribs;
-    CreateInfo.VertexBufferStride = sizeof(FinalPassVertex);
-    CreateInfo.Shader = GRenderAPI->CreateShader(&ShaderCreateInfo);
-    CreateInfo.CompatibleSwapChain = Globals.mSwap;
-    CreateInfo.Layout = Layout;
+        mFinalPassResourceLayout = GRenderAPI->CreateResourceLayout(&RlCreateInfo);
+    }
 
-    PipelineBlendSettings BlendSettings;
-    BlendSettings.bBlendingEnabled = false;
-    CreateInfo.BlendSettingCount = 1;
-    CreateInfo.BlendSettings = &BlendSettings;
+    void CreateFinalPassResources(SwapChain Swap)
+    {
+        ResourceSetCreateInfo CreateInfo{};
+        CreateInfo.Layout = mFinalPassResourceLayout;
+        CreateInfo.TargetSwap = Swap;
+        mFinalPassResourceSet = GRenderAPI->CreateResourceSet(&CreateInfo);
+    }
 
-    return GRenderAPI->CreatePipeline(&CreateInfo);
-}
+    void CreateFinalPassPipeline()
+    {
+        ShaderCreateInfo ShaderCreateInfo{};
+        ShaderCreateInfo.VertexShaderVirtual = "/Shaders/FinalPass.vert";
+        ShaderCreateInfo.FragmentShaderVirtual = "/Shaders/FinalPass.frag";
+
+        VertexAttribute Attribs[] = {
+            {VertexAttributeFormat::Float3, offsetof(FinalPassVertex, mPosition)},
+            {VertexAttributeFormat::Float2, offsetof(FinalPassVertex, mUV)}
+
+        };
+        PipelineCreateInfo CreateInfo{};
+        CreateInfo.VertexAttributeCount = std::size(Attribs);
+        CreateInfo.VertexAttributes = Attribs;
+        CreateInfo.VertexBufferStride = sizeof(FinalPassVertex);
+        CreateInfo.Shader = GRenderAPI->CreateShader(&ShaderCreateInfo);
+        CreateInfo.CompatibleSwapChain = Globals.mSwap;
+        CreateInfo.Layout = mFinalPassResourceLayout;
+
+        PipelineBlendSettings BlendSettings;
+        BlendSettings.bBlendingEnabled = false;
+        CreateInfo.BlendSettingCount = 1;
+        CreateInfo.BlendSettings = &BlendSettings;
+
+        mFinalPassPipeline = GRenderAPI->CreatePipeline(&CreateInfo);
+    }
+
+    void CreateMesh()
+    {
+        mScreenSpaceMesh = CreateScreenSpaceMesh<FinalPassVertex, true>(FinalPassVertex{});
+    }
+
+    void Init()
+    {
+        CreateFinalPassResourceLayout();
+        CreateFinalPassResources(Globals.mSwap);
+        CreateFinalPassPipeline();
+        CreateMesh();
+    }
+
+    void Composite(CommandBuffer Buf, FrameBuffer Src, uint32_t ColorAttachment, uint32_t SwapWidth, uint32_t SwapHeight)
+    {
+        // Composite
+        RenderGraphInfo RenderGraphInfo = {
+1,
+ClearValue{ClearType::Float, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)}
+        };
+        GRenderAPI->BeginRenderGraph(Buf, Globals.mSwap, RenderGraphInfo);
+        {
+            GRenderAPI->UpdateAttachmentResource(mFinalPassResourceSet, Globals.mSwap, Src, ColorAttachment, 0);
+
+        	GRenderAPI->BindPipeline(Buf, mFinalPassPipeline);
+        	GRenderAPI->BindResources(Buf, mFinalPassResourceSet);
+            GRenderAPI->SetViewport(Buf, 0, 0, static_cast<uint32_t>(SwapWidth), static_cast<uint32_t>(SwapHeight));
+            GRenderAPI->SetScissor(Buf, 0, 0, static_cast<uint32_t>(SwapWidth), static_cast<uint32_t>(SwapHeight));
+
+            GRenderAPI->DrawVertexBufferIndexed(Buf, mScreenSpaceMesh.mBuffer, mScreenSpaceMesh.mIndexCount);
+        }
+        GRenderAPI->EndRenderGraph(Buf);
+
+    }
+
+} gFinalPass;
 
 struct SceneResourceInit
 {
@@ -318,18 +495,17 @@ struct SceneResourceInit
 
 void RenderScene(CommandBuffer Dst, Scene Render, uint32_t SwapWidth, uint32_t SwapHeight)
 {
-    if(!SceneRes.mInitialized)
-    {
-        SceneRes.Init(Globals.mSwap);
-    	SceneRes.mInitialized = true;
-    }
 
-    RenderGraphInfo CompositeInfo = {
-    1,
-    ClearValue{ClearType::Float, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)}
+    ClearValue DepthClear{};
+    DepthClear.Depth = 1.0f;
+    RenderGraphInfo RenderSceneInfo = {
+    2,
+    ClearValue{ClearType::Float, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)},
+        DepthClear
     };
 
-    GRenderAPI->BeginRenderGraph(Dst, Globals.mSwap, CompositeInfo);
+    GRenderAPI->TransitionFrameBufferColorAttachment(Dst, SceneRes.mForwardFramebuffer, 0, AttachmentUsage::ShaderRead, AttachmentUsage::ColorAttachment);
+    GRenderAPI->BeginRenderGraph(Dst, SceneRes.mForwardRenderGraph, SceneRes.mForwardFramebuffer, RenderSceneInfo);
     {
         GRenderAPI->UpdateUniformBuffer(SceneRes.mForwardResources, Globals.mSwap, 0, &SceneRes.mVertexUniforms, sizeof(SceneRes.mVertexUniforms));
 
@@ -347,40 +523,6 @@ void RenderScene(CommandBuffer Dst, Scene Render, uint32_t SwapWidth, uint32_t S
     }
     GRenderAPI->EndRenderGraph(Dst);
 
-}
-
-template<typename VertexType>
-Mesh CreateScreenSpaceMesh(VertexType DefaultVal)
-{
-    Mesh NewMesh{};
-
-    VertexBufferCreateInfo VBOCreate{};
-    VBOCreate.bCreateIndexBuffer = true;
-    VBOCreate.Usage = BufferUsage::Static;
-    VBOCreate.VertexBufferSize = sizeof(VertexType) * 4;
-    VBOCreate.IndexBufferSize = sizeof(uint32_t) * 6;
-    NewMesh.mBuffer = GRenderAPI->CreateVertexBuffer(&VBOCreate);
-
-    VertexType ScreenSpace[4] = { DefaultVal, DefaultVal, DefaultVal, DefaultVal };
-    uint32_t IndexBuffer[] = {
-        0, 2, 1,
-        0, 3, 2
-    };
-    if (std::is_same_v<decltype(DefaultVal.mPosition), glm::vec3>)
-    {
-        ScreenSpace[0].mPosition = { -1.0f, -1.0f, -5.0f };
-        ScreenSpace[1].mPosition = { -1.0f, 1.0f, -5.0f };
-        ScreenSpace[2].mPosition = { 1.0f, 1.0f, -5.0f };
-        ScreenSpace[3].mPosition = { 1.0f, -1.0f, -5.0f };
-    }
-
-    GRenderAPI->UploadVertexBufferData(NewMesh.mBuffer, ScreenSpace, sizeof(ScreenSpace));
-    GRenderAPI->UploadIndexBufferData(NewMesh.mBuffer, IndexBuffer, sizeof(IndexBuffer));
-
-    NewMesh.mVertexCount = 4;
-    NewMesh.mIndexCount = 6;
-
-    return NewMesh;
 }
 
 void ProcessNode(const aiScene* Scene, aiNode* Node)
@@ -539,6 +681,9 @@ int main()
         FrameHeight = NewHeight;
         GRenderAPI->RecreateSwapChain(Globals.mSwap, Globals.mSurface, NewWidth, NewHeight);
 
+        // Resize framebuffer
+        SceneRes.Resize(NewWidth, NewHeight);
+
         SceneRes.UpdateCamera();
     };
 
@@ -555,10 +700,10 @@ int main()
     ImGuiContext* Context = InitImGui(Globals.mWindow, Globals.mSwap, { true, true, true });
     ImGui::SetCurrentContext(Context);
 
-    CommandBuffer FinalPass = GRenderAPI->CreateSwapChainCommandBuffer(Globals.mSwap, true);
-    Pipeline FinalPassPipeline = CreateFinalPassPipeline();
+    gFinalPass.Init();
+    SceneRes.Init(Globals.mSwap);
 
-    Mesh ScreenSpaceMesh = CreateScreenSpaceMesh(FinalPassVertex{});
+    CommandBuffer FinalPass = GRenderAPI->CreateSwapChainCommandBuffer(Globals.mSwap, true);
 
     // Load the scene
     auto SceneFile = ContentRoot / "Sponza-master" / "sponza.obj";
@@ -593,7 +738,10 @@ int main()
             GRenderAPI->Begin(FinalPass);
             {
                 RenderScene(FinalPass, NewScene, SwapWidth, SwapHeight);
-                RecordImGuiDrawCmds(FinalPass);
+
+                gFinalPass.Composite(FinalPass, SceneRes.mForwardFramebuffer, 0, SwapWidth, SwapHeight);
+
+            	RecordImGuiDrawCmds(FinalPass);
             }
             GRenderAPI->End(FinalPass);
 
