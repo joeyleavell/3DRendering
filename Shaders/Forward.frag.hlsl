@@ -1,3 +1,14 @@
+struct DirectionalLight
+{
+    float3 mDir;
+};
+
+cbuffer FragmentData : register(b1, space0)
+{
+    float3 mEye;
+	DirectionalLight mDirLight;
+}
+
 struct PSIn
 {
     float4 Position : SV_Position;
@@ -13,8 +24,8 @@ PSOut main(PSIn Input)
 {
     PSOut Output;
 
-    float3 NormClamped = (Input.Normal + 1.0f) * 0.5f;
-    Output.Color = float4(NormClamped, 1.0f);
+    float NdotL = dot(Input.Normal, mDirLight.mDir);
+    Output.Color = float4(float3(1.0f, 1.0f, 1.0f) * NdotL, 1.0f);
 
     return Output;
 }

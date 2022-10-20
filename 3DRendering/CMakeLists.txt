@@ -18,6 +18,7 @@ add_executable (3DRendering "3DRendering.cpp")
 
 target_link_libraries(3DRendering NewEngine-Runtime)
 target_link_libraries(3DRendering assimp)
+target_link_libraries(3DRendering stb)
 
 if(APPLE)
   set_target_properties(3DRendering PROPERTIES INSTALL_RPATH "@executable_path/Lib")

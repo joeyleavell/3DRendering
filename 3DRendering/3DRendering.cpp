@@ -15,6 +15,9 @@
 #include "glm/gtx/rotate_vector.hpp"
 #include "imgui_internal.h"
 #include <cmath>
+#include "stb_image.h"
+
+#include "Asset.h"
 #include "Input.h"
 #include "glm/gtx/quaternion.hpp"
 
@@ -62,10 +65,29 @@ struct SceneVertexUniforms
     glm::mat4 ViewProjectionMatrix;
 };
 
+struct DirectionalLight
+{
+    alignas(16) glm::vec3 Direction;
+};
+
+struct SceneFragmentUniforms
+{
+    alignas(16) glm::vec3 mEye;
+    alignas(16) DirectionalLight mDir;
+};
+
 struct MeshVertex
 {
     glm::vec3 mPosition;
     glm::vec3 mNormal;
+};
+
+struct Material
+{
+    bool bUsesAlbedoTexture = false;
+
+    glm::vec3 AlbedoColor;
+	Texture AlbedoTexture;
 };
 
 struct Mesh
@@ -78,7 +100,7 @@ struct Mesh
 struct Scene
 {
     std::vector<Mesh> mMeshes;
-
+    std::vector<Material> mMaterials;
 };
 
 struct Camera
@@ -237,7 +259,8 @@ Mesh CreateScreenSpaceMesh(VertexType DefaultVal)
 struct SceneRenderResources
 {
     SceneVertexUniforms mVertexUniforms;
-    ResourceSet mForwardResources;
+    SceneFragmentUniforms mFragmentUniforms;
+	ResourceSet mForwardResources;
     ResourceLayout mForwardResourceLayout;
     Pipeline mForwardPipe;
     FrameBuffer mForwardFramebuffer;
@@ -299,7 +322,8 @@ struct SceneRenderResources
     void CreateForwardPipeline()
     {
         ConstantBufferDescription ConstBuffer[] = {
-            {0, 1, ShaderStage::Vertex, sizeof(SceneVertexUniforms)}
+            {0, 1, ShaderStage::Vertex, sizeof(SceneVertexUniforms)},
+            {1, 1, ShaderStage::Fragment, sizeof(SceneFragmentUniforms)}
         };
         ResourceLayoutCreateInfo RlCreateInfo{};
         RlCreateInfo.ConstantBufferCount = std::size(ConstBuffer);
@@ -357,6 +381,8 @@ struct SceneRenderResources
 
     	CreateForwardPipeline();
         CreateForwardResources(Swap);
+
+        mFragmentUniforms.mDir.Direction = glm::normalize(glm::vec3(-1.0f, -1.0f, 0.0f));
     }
 
 
@@ -531,13 +557,12 @@ void RenderScene(CommandBuffer Dst, Scene Render, uint32_t SwapWidth, uint32_t S
     GRenderAPI->BeginRenderGraph(Dst, SceneRes.mForwardRenderGraph, SceneRes.mForwardFramebuffer, RenderSceneInfo);
     {
         GRenderAPI->UpdateUniformBuffer(SceneRes.mForwardResources, Globals.mSwap, 0, &SceneRes.mVertexUniforms, sizeof(SceneRes.mVertexUniforms));
+        GRenderAPI->UpdateUniformBuffer(SceneRes.mForwardResources, Globals.mSwap, 1, &SceneRes.mFragmentUniforms, sizeof(SceneRes.mFragmentUniforms));
 
     	GRenderAPI->BindPipeline(Dst, SceneRes.mForwardPipe);
         GRenderAPI->BindResources(Dst, SceneRes.mForwardResources);
     	GRenderAPI->SetViewport(Dst, 0, 0, static_cast<uint32_t>(SwapWidth), static_cast<uint32_t>(SwapHeight));
         GRenderAPI->SetScissor(Dst, 0, 0, static_cast<uint32_t>(SwapWidth), static_cast<uint32_t>(SwapHeight));
-
-       // GRenderAPI->DrawVertexBufferIndexed(Dst, Render.mMeshes[0].mBuffer, Render.mMeshes[0].mIndexCount);
 
         for (auto Mesh : Render.mMeshes)
         {
@@ -554,6 +579,88 @@ void ProcessNode(const aiScene* Scene, aiNode* Node)
 }
 
 static glm::vec3 Bl, Tr;
+
+aiColor3D GetAlbedo(const aiMaterial* AIMat)
+{
+    aiColor3D AIAlbedo{1.0f, 1.0f, 1.0f};
+    if (AIMat->Get(AI_MATKEY_BASE_COLOR, AIAlbedo) == aiReturn_SUCCESS)
+        return AIAlbedo;
+    if (AIMat->Get(AI_MATKEY_COLOR_DIFFUSE, AIAlbedo) == aiReturn_SUCCESS)
+        return AIAlbedo;
+    return AIAlbedo;
+}
+
+bool GetAlbedoTexture(const aiMaterial* AIMat, aiString& OutPath)
+{
+    aiString AlbedoPath{};
+    if (AIMat->GetTexture(aiTextureType_BASE_COLOR, 0, &AlbedoPath) == aiReturn_SUCCESS)
+    {
+        OutPath = AlbedoPath;
+        return true;
+    }
+    if (AIMat->GetTexture(aiTextureType_DIFFUSE, 0, &AlbedoPath) == aiReturn_SUCCESS)
+    {
+        OutPath = AlbedoPath;
+        return true;
+    }
+
+    return false;
+}
+
+Texture LoadTexture(const aiString& TexturePath, std::string ParentPath)
+{
+    Texture Result{};
+    std::filesystem::path FullTexturePath = TexturePath.C_Str();
+    if(FullTexturePath.is_relative())
+    {
+        FullTexturePath = std::filesystem::canonical(ParentPath / FullTexturePath);
+    }
+
+    int32_t Width, Height, NumChannels;
+    if (stbi_uc* Ret = stbi_load(FullTexturePath.string().c_str(), &Width, &Height, &NumChannels, 4))
+    {
+        uint8_t* TexData = new uint8_t[Width * Height * 4];
+
+        // Copy over image data
+        for (uint32_t Row = 0; Row < static_cast<uint32_t>(Height); Row++)
+        {
+            for (uint32_t Col = 0; Col < static_cast<uint32_t>(Width); Col++)
+            {
+                uint32_t BaseIndex = Row * Width + Col;
+                TexData[BaseIndex + 0] = Ret[BaseIndex + 0];
+                TexData[BaseIndex + 1] = Ret[BaseIndex + 1];
+                TexData[BaseIndex + 2] = Ret[BaseIndex + 2];
+                TexData[BaseIndex + 3] = Ret[BaseIndex + 3];
+            }
+        }
+
+        Result = GRenderAPI->CreateTexture(Width * Height * 4, TextureFormat::UINT32_R8G8B8A8, Width, Height, TexData);
+
+        delete[] TexData;
+
+        stbi_image_free(Ret);
+    }
+
+    // Always only a single result with textures
+	return Result;
+}
+
+Material BuildMaterial(const aiMaterial* AIMat, std::string ParentPath)
+{
+    Material NewMat;
+
+    aiColor3D AIAlbedo = GetAlbedo(AIMat);
+    NewMat.AlbedoColor = glm::vec3{AIAlbedo.r, AIAlbedo.g, AIAlbedo.b};
+
+    aiString AlbedoTex;
+    if(GetAlbedoTexture(AIMat, AlbedoTex))
+    {
+        NewMat.bUsesAlbedoTexture = true;
+        NewMat.AlbedoTexture = LoadTexture(AlbedoTex, ParentPath);
+    }
+
+    return NewMat;
+}
 
 Mesh BuildMesh(const aiMesh* AIMesh)
 {
@@ -606,6 +713,7 @@ Mesh BuildMesh(const aiMesh* AIMesh)
 
 Scene ImportScene(std::string File)
 {
+    std::string ParentPath = std::filesystem::path(File).parent_path().string();
     Assimp::Importer Importer;
     const aiScene* AIScene = Importer.ReadFile(File,
         aiProcess_CalcTangentSpace       |
@@ -622,6 +730,14 @@ Scene ImportScene(std::string File)
         aiMesh* Mesh = AIScene->mMeshes[MeshIndex];
         NewScene.mMeshes.push_back(BuildMesh(Mesh));
     }
+
+    // Build materials
+    for (uint32_t MatIndex = 0; MatIndex < AIScene->mNumMaterials; MatIndex++)
+    {
+        aiMaterial* Material = AIScene->mMaterials[MatIndex];
+        NewScene.mMaterials.push_back(BuildMaterial(Material, ParentPath));
+    }
+
 
     if(AIScene->mRootNode)
         ProcessNode(AIScene, AIScene->mRootNode);
@@ -656,7 +772,8 @@ void Tick(float Delta)
     glm::mat4 Proj = CreateCameraProjection(SceneRes.mSceneCamera);
     glm::mat4 Trans = CreateCamTransform(SceneRes.mSceneCamera);
     glm::mat4 View = CreateViewMatrix(SceneRes.mSceneCamera);
-    
+
+    SceneRes.mFragmentUniforms.mEye = SceneRes.mSceneCamera.Position;
 	SceneRes.mVertexUniforms.ViewProjectionMatrix = glm::transpose(Proj * View);
 
     glm::vec4 Forward = glm::vec4(0.0f, 0.0f, -1.0f, 0.0f);
@@ -821,7 +938,7 @@ int main()
     CommandBuffer FinalPass = GRenderAPI->CreateSwapChainCommandBuffer(Globals.mSwap, true);
 
     // Load the scene
-    auto SceneFile = ContentRoot / "Sponza-master" / "sponza.obj";
+    auto SceneFile = ContentRoot / "Sponza" / "Sponza.gltf";
     Scene NewScene = ImportScene(SceneFile.string());
 
     auto ThisTime = std::chrono::high_resolution_clock::now();
