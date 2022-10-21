@@ -63,6 +63,7 @@ struct FinalPassVertex
 struct SceneVertexUniforms
 {
     glm::mat4 ViewProjectionMatrix;
+    glm::mat4 ModelMatrix;
 };
 
 struct DirectionalLight

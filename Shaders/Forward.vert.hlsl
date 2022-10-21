@@ -19,7 +19,7 @@ VSOut main(VSIn Input)
 {
     VSOut Output;
 
-    Output.Position = ViewProjection * float4(Input.Position, 1.0);
+    Output.Position = ViewProjection * float4(Input.Position.x, Input.Position.z, Input.Position.y, 1.0);
     Output.Normal = Input.Normal;
 
     return Output;
