@@ -1,18 +1,5 @@
 cmake_minimum_required (VERSION 3.22)
 
-include(FetchContent)
-
-Set(FETCHCONTENT_QUIET FALSE)
-
-FetchContent_Declare(
-	NewEngine
-	GIT_REPOSITORY https://github.com/joeyleavell/NewEngine.git
-	GIT_TAG        69f7f61f046d547dfb658301ee69960e70fc2669
-	GIT_PROGRESS TRUE
-)
-
-FetchContent_MakeAvailable(NewEngine)
-
 # Add source to this project's executable.
 add_executable (3DRendering "3DRendering.cpp")
 

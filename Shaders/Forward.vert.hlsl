@@ -13,7 +13,7 @@ struct VSOut
 {
     float4 Position : SV_Position;
     float3 Normal : NORMAL0;
-};
+};vv
 
 VSOut main(VSIn Input)
 {

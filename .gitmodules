@@ -1,0 +1,3 @@
+[submodule "NewEngine"]
+	path = NewEngine
+	url = https://github.com/joeyleavell/NewEngine.git

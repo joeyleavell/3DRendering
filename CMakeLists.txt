@@ -4,4 +4,5 @@ project(3DRendering)
 
 set(CMAKE_INSTALL_BINDIR .)
 
+add_subdirectory(NewEngine)
 add_subdirectory(3DRendering)
